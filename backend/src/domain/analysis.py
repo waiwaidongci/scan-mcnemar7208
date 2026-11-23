@@ -4,6 +4,7 @@ from collections import Counter
 from decimal import Decimal, localcontext
 from fractions import Fraction
 
+from .groups import build_groups, display_order
 from .spec import SPEC
 
 
@@ -81,15 +82,22 @@ def _table(title, columns, rows):
     }
 
 
-def analyze(rows, normalized_params):
+def analyze(rows, normalized_params, links=None, link_version=None):
     documents = validate_rows(rows)
     options = _run_parameters(normalized_params)
-    counts = Counter((row["a_pass"], row["b_pass"]) for row in documents)
+    groups = build_groups(documents, links)
+    counted = [group for group in groups if group['consistent']]
+    pending = [group for group in groups if not group['consistent']]
+    if not counted:
+        raise ValueError('同票组全部判定分歧待核，没有可计入的有效配对。')
+    counts = Counter((group['a_pass'], group['b_pass']) for group in counted)
     both_pass = counts[True, True]
     a_only = counts[True, False]
     b_only = counts[False, True]
     both_fail = counts[False, False]
-    pair_count = len(documents)
+    pair_count = len(counted)
+    scan_count = len(documents)
+    merged = scan_count - len(groups)
     a_pass = both_pass + a_only
     b_pass = both_pass + b_only
     gain_pp = Fraction(100 * (b_only - a_only), pair_count)
@@ -107,14 +115,14 @@ def analyze(rows, normalized_params):
     failed_gates = [label for label, _, _, passed in gates if not passed]
 
     disagreements = []
-    for document in sorted(documents, key=lambda row: (row["b_pass"], row["document_id"])):
-        if document["a_pass"] == document["b_pass"]:
-            continue
-        improved = document["b_pass"]
+    discordant = [group for group in counted if group['a_pass'] != group['b_pass']]
+    for group in sorted(discordant, key=lambda item: (item['b_pass'], item['members'][0])):
+        improved = group['b_pass']
+        rows_in_group = group['rows']
         disagreements.append({
-            "document_id": document["document_id"],
-            "batch_id": document["batch_id"],
-            "document_type": document["document_type"],
+            "document_id": "、".join(group['members']),
+            "batch_id": "、".join(dict.fromkeys(row["batch_id"] for row in rows_in_group)),
+            "document_type": "、".join(dict.fromkeys(row["document_type"] for row in rows_in_group)),
             "outcome": "仅 B 通过" if improved else "仅 A 通过",
             "next_step": "抽核 B 的通过判定" if improved else "优先核对 B 的未通过字段",
         })
@@ -124,20 +132,43 @@ def analyze(rows, normalized_params):
     else:
         headline = "达到统计验收门槛，提交差异复核。"
     note = f"同批票据有效配对 {pair_count} 对。现用 A 通过 {a_pass} 对，候选 B 通过 {b_pass} 对。"
+    if merged:
+        note += f"同票关系把 {scan_count} 件扫描件归并为 {len(groups)} 组。"
+    if pending:
+        note += f"{len(pending)} 组同票扫描判定分歧，整组待核未计入有效配对。"
     if not disagreements:
         note += "本批两引擎逐单判定一致，差异对为 0，p 值记为 1。"
+
+    metrics = [
+        {"label": "有效配对数", "value": pair_count, "detail": f"差异对 {a_only + b_only} 对"},
+        {"label": "同票分组", "value": f"{len(groups)} 组",
+         "detail": f"{scan_count} 件扫描件" + (f"，合并重复 {merged} 件" if merged else "，无同票关系")},
+        {"label": "待核同票组", "value": len(pending),
+         "detail": "判定分歧整组未计入" if pending else "无判定分歧组"},
+    ]
+    if link_version is not None:
+        metrics.append({"label": "同票关系版本", "value": f"v{link_version}",
+                        "detail": "发起时固定，重试与导出同版"})
+    metrics += [
+        {"label": "现用 A 通过率", "value": f"{a_pass / pair_count:.2%}", "detail": f"{a_pass}/{pair_count} 对"},
+        {"label": "候选 B 通过率", "value": f"{b_pass / pair_count:.2%}", "detail": f"{b_pass}/{pair_count} 对"},
+        {"label": "候选 B 净增（百分点）", "value": gain_text, "detail": f"仅 B 通过 {b_only} 对，减仅 A 通过 {a_only} 对"},
+        {"label": "双侧精确 p 值", "value": p_text, "detail": f"显著性水平 α = {alpha}"},
+    ]
+
+    group_rows = [{
+        "group_key": f"G{index}",
+        "members": "、".join(group["members"]),
+        "size": group["size"],
+        "counted": "计入 1 对" if group["consistent"] else "待核未计入",
+        "reason": group["reason"],
+    } for index, group in enumerate(display_order(groups), 1)]
 
     return {
         "state": "warning" if failed_gates else "ok",
         "headline": headline,
         "note": note,
-        "metrics": [
-            {"label": "有效配对数", "value": pair_count, "detail": f"差异对 {a_only + b_only} 对"},
-            {"label": "现用 A 通过率", "value": f"{a_pass / pair_count:.2%}", "detail": f"{a_pass}/{pair_count} 对"},
-            {"label": "候选 B 通过率", "value": f"{b_pass / pair_count:.2%}", "detail": f"{b_pass}/{pair_count} 对"},
-            {"label": "候选 B 净增（百分点）", "value": gain_text, "detail": f"仅 B 通过 {b_only} 对，减仅 A 通过 {a_only} 对"},
-            {"label": "双侧精确 p 值", "value": p_text, "detail": f"显著性水平 α = {alpha}"},
-        ],
+        "metrics": metrics,
         "tables": [
             _table("配对四格表", (("a", "现用 A"), ("b_pass", "候选 B 通过"), ("b_fail", "候选 B 未通过")), [
                 {"a": "通过", "b_pass": both_pass, "b_fail": a_only},
@@ -151,6 +182,10 @@ def analyze(rows, normalized_params):
                 ("document_id", "票据编号"), ("batch_id", "扫描批次"), ("document_type", "票据类型"),
                 ("outcome", "配对判定"), ("next_step", "复核动作"),
             ), disagreements),
+            _table("同票分组明细", (
+                ("group_key", "分组"), ("members", "成员扫描件"), ("size", "件数"),
+                ("counted", "是否计入"), ("reason", "原因"),
+            ), group_rows),
         ],
         "charts": [{
             "title": "四类配对判定",
@@ -165,6 +200,11 @@ def analyze(rows, normalized_params):
             {"title": "精确检验与门槛", "text": (
                 f"仅 A 通过 {a_only} 对，仅 B 通过 {b_only} 对。双侧检验只用这 {a_only + b_only} 个差异对。"
                 "门槛判断使用舍入前的精确数值。未达到显著性门槛表示当前证据不足以确认差异。"
+            )},
+            {"title": "同票分组口径", "text": (
+                f"本批 {scan_count} 件扫描件按发起时固定的同票关系归并为 {len(groups)} 组："
+                f"{pair_count} 组判定一致计入有效配对，{len(pending)} 组判定分歧整组待核。"
+                "登记与撤销只产生新版本，本结果仍按发起时的版本计算，新版发布后不能换回。"
             )},
             {"title": "复核与交付", "text": (
                 "先核对仅 A 通过的票据，再抽核仅 B 通过的票据。按票据编号回看影像与人工底单，"

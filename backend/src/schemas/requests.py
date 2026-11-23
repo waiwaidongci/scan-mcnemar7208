@@ -19,6 +19,10 @@ class RunRequest(Request):
     name: str = Field(min_length=1, max_length=120)
     params: dict = Field(default_factory=dict)
 
+class LinkRequest(Request):
+    left_id: str = Field(min_length=1, max_length=300)
+    right_id: str = Field(min_length=1, max_length=300)
+
 class ReviewRequest(Request):
     review: Review
     note: str = Field(min_length=1, max_length=500)

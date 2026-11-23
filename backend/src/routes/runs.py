@@ -9,8 +9,10 @@ from src.controllers.auth import allow, current
 from src.domain.spec import SPEC
 from src.models.identity import User
 from src.models.jobs import Run
+from src.models.links import RunLinkSnapshot
 from src.models.source import Dataset
 from src.schemas.requests import ReviewRequest, RunRequest
+from src.services import links as registry
 from src.services.audit import record
 from src.services.validation import normalize_params
 from src.utils import views
@@ -26,6 +28,11 @@ def require_job(db, run_id, lock=False):
     return item
 
 
+def link_version(db, run_id):
+    snapshot = db.get(RunLinkSnapshot, run_id)
+    return snapshot.version if snapshot else None
+
+
 @router.get('')
 def index(db: Session = Depends(connection), actor: User = Depends(current)):
     return [views.run(item) for item in db.scalars(select(Run).order_by(Run.id.desc()).limit(100))]
@@ -39,15 +46,18 @@ def create(body: RunRequest, db: Session = Depends(connection),
     item = Run(name=body.name, dataset_id=body.dataset_id, params=normalize_params(body.params), author=actor.username)
     db.add(item)
     db.flush()
-    record(db, actor.username, 'analysis.queued', item.id, dataset_id=item.dataset_id)
+    # 发起时固定同票关系版本与快照，之后的登记、撤销不影响本次运行。
+    version = registry.pin(db, item.id, item.dataset_id)
+    record(db, actor.username, 'analysis.queued', item.id, dataset_id=item.dataset_id, link_version=version)
     db.commit()
     wake()
-    return views.run(item, detail=True)
+    return views.run(item, detail=True, link_version=version)
 
 
 @router.get('/{run_id}')
 def detail(run_id: int, db: Session = Depends(connection), actor: User = Depends(current)):
-    return views.run(require_job(db, run_id), detail=True)
+    item = require_job(db, run_id)
+    return views.run(item, detail=True, link_version=link_version(db, item.id))
 
 
 @router.get('/{run_id}/export')

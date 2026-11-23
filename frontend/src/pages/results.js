@@ -40,10 +40,14 @@ export async function results(route, refresh) {
     result.tables.map(item=>panel(item.title,table(item.columns,item.rows,{caption:item.title}))))
     : panel(job.name,pill(STATUS[job.status],job.status),p(job.error,'feedback'),link('返回调整参数',`#run/${job.dataset_id}`,{class:'quiet'}));
   const inputs = spec.params.map(param=>el('div',{},el('dt',{},param.label),el('dd',{},value(job.params[param.key]))));
+  inputs.push(el('div',{},el('dt',{},'同票关系版本'),el('dd',{},job.link_version != null ? `v${job.link_version}` : '—')));
+  const registryInfo = await workspace.links(job.dataset_id).catch(()=>null);
+  const moved = registryInfo && job.link_version != null && registryInfo.version > job.link_version;
   return el('div',{},el('div',{class:'two-col'},el('div',{class:'wide-panel'},analysis),
     el('aside',{class:'sidebar-panel'},panel('运行来源',history,
       source && link(source.name,`#inputs/${source.id}`),p(date(job.finished_at),'subtle'),
-      el('dl',{class:'dictionary'},inputs)),
+      el('dl',{class:'dictionary'},inputs),
+      moved && p(`同票关系已更新至 v${registryInfo.version}，本结果仍按发起时的 v${job.link_version} 计算；新版发布后旧版不能换回，如需按新口径验收请重新运行。`,'feedback')),
     result && panel(spec.decision, pill(REVIEW[job.review],job.review),
       link('打开复核记录',`#review/${job.id}`,{class:'quiet'})))));
 }

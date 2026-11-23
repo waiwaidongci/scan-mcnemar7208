@@ -6,6 +6,7 @@ from src.constants.enums import Status
 from src.domain.analysis import analyze
 from src.domain.spec import SPEC
 from src.models.jobs import Delivery, Run, Schedule
+from src.models.links import RunLinkSnapshot
 from src.models.source import Dataset
 from src.services.audit import record
 from src.utils.exports import write_report
@@ -58,14 +59,18 @@ def claim():
         job.attempt += 1
         job.lease_until = stamp + timedelta(minutes=3)
         records = db.get(Dataset, job.dataset_id).rows
-        return job.id, job.attempt, records, job.params
+        # 重试也读取发起时固定的同票关系快照，不随后续登记、撤销变化。
+        snapshot = db.get(RunLinkSnapshot, job.id)
+        links = snapshot.links if snapshot else []
+        link_version = snapshot.version if snapshot else None
+        return job.id, job.attempt, records, job.params, links, link_version
 
 
 def execute(lease):
-    job_id, attempt, rows, params = lease
+    job_id, attempt, rows, params, links, link_version = lease
     result = export = failure = None
     try:
-        result = analyze(rows, params)
+        result = analyze(rows, params, links, link_version)
         export = write_report(job_id, attempt, result)
     except ValueError as error:
         failure = str(error)[:500]
